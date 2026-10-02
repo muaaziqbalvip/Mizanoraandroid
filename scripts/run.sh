@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Runs inside the booted emulator. Starts ws-scrcpy + Cloudflare tunnel,
-# publishes the URL to the `status` branch, then hands over to a fresh run.
+# Runs inside the booted emulator: stream + tunnel, then a CLEAN shutdown so
+# the workflow can save the phone's data and start the next run.
 set -uo pipefail
 
 RUN_ID="${GITHUB_RUN_ID}"
 START=$(date +%s)
-HANDOVER_AT=$((START + 5*3600 + 30*60))   # start the next run at 5h30
-HARD_END=$((START + 5*3600 + 52*60))      # never run past 5h52
+END=$((START + 5*3600 + 15*60))           # leave ~30 min for save + restart
 REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 S=/tmp/status
 
@@ -21,8 +20,6 @@ sync_status() {
   git -C "$S" config user.email "bot@users.noreply.github.com"
 }
 
-remote_run_id() { sync_status; jq -r '.run_id // empty' "$S/status.json" 2>/dev/null; }
-
 publish() {
   sync_status
   jq -n --arg url "$1" --arg run "$RUN_ID" --argjson ts "$(date +%s)" \
@@ -33,6 +30,12 @@ publish() {
 }
 
 echo "== devices"; adb devices
+
+echo "== speed tweaks (smaller screen = much faster stream)"
+adb shell wm size 720x1600 || true
+adb shell wm density 280 || true
+adb shell svc power stayon true || true
+adb shell settings put system screen_off_timeout 2147483647 || true
 
 echo "== ws-scrcpy"
 ( cd /tmp/ws-scrcpy/dist && PORT=8000 node index.js > /tmp/wsscrcpy.log 2>&1 & )
@@ -50,17 +53,14 @@ if [ -z "$URL" ]; then echo "tunnel failed"; cat /tmp/cf.log; exit 1; fi
 echo "tunnel: $URL"
 publish "$URL"
 
-HANDED=0
-while [ "$(date +%s)" -lt "$HARD_END" ]; do
-  if [ "$HANDED" = 0 ] && [ "$(date +%s)" -ge "$HANDOVER_AT" ]; then
-    echo "== handover: starting next run"
-    gh workflow run emulator.yml -R "$GITHUB_REPOSITORY" && HANDED=1
-  fi
+while [ "$(date +%s)" -lt "$END" ]; do
   if ! kill -0 "$CF_PID" 2>/dev/null; then echo "tunnel died"; exit 1; fi
-  RID=$(remote_run_id)
-  if [ "$HANDED" = 1 ] && [ -n "$RID" ] && [ "$RID" != "$RUN_ID" ]; then
-    echo "new run is live, shutting down"; break
-  fi
-  [ "$HANDED" = 0 ] && publish "$URL"   # heartbeat
   sleep 120
+  publish "$URL"   # heartbeat
 done
+
+echo "== clean shutdown (so data is flushed to disk)"
+kill "$CF_PID" 2>/dev/null || true
+adb emu kill || true
+for i in $(seq 1 60); do pgrep -f 'qemu-system' >/dev/null || break; sleep 2; done
+echo "emulator stopped"
