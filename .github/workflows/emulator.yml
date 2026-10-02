@@ -1,0 +1,54 @@
+name: Emulator (24/7 loop)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # status branch push
+  actions: write    # self re-dispatch
+
+jobs:
+  phone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build ws-scrcpy (browser screen + touch)
+        run: |
+          git clone --depth 1 https://github.com/NetrisTV/ws-scrcpy.git /tmp/ws-scrcpy
+          cd /tmp/ws-scrcpy
+          npm install
+          npm run dist
+          cd dist && npm install --omit=dev
+
+      - name: Get cloudflared
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+
+      - name: Run emulator + tunnel until handover
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          disk-size: 8G
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash ./scripts/run.sh

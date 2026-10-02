@@ -1,0 +1,25 @@
+name: Watchdog
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Start emulator if nothing is running
+        run: |
+          active=$(( $(gh run list -R "$GITHUB_REPOSITORY" --workflow emulator.yml --status in_progress --json databaseId -q length) \
+                   + $(gh run list -R "$GITHUB_REPOSITORY" --workflow emulator.yml --status queued --json databaseId -q length) ))
+          echo "active emulator runs: $active"
+          if [ "$active" -eq 0 ]; then
+            gh workflow run emulator.yml -R "$GITHUB_REPOSITORY"
+          fi
