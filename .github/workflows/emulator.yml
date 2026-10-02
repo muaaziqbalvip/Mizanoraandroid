@@ -5,12 +5,15 @@ on:
 
 permissions:
   contents: write   # status branch push
-  actions: write    # self re-dispatch
+  actions: write    # re-dispatch + cache
 
 jobs:
   phone:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BACKUP_KEY: ${{ secrets.BACKUP_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,18 +40,60 @@ jobs:
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
           chmod +x /tmp/cloudflared
 
-      - name: Run emulator + tunnel until handover
+      # ---- bring back the saved phone (apps, accounts, files) ----
+      - name: Restore saved phone
+        if: env.BACKUP_KEY != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/phone.tar.zst.enc
+          key: phone-none-${{ github.run_id }}
+          restore-keys: phone-state-
+
+      - name: Unpack saved phone
+        if: env.BACKUP_KEY != ''
+        run: |
+          AVD="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+          if [ -f /tmp/phone.tar.zst.enc ]; then
+            mkdir -p "$AVD"
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_KEY -in /tmp/phone.tar.zst.enc | zstd -d -T0 | tar -x -C "$AVD"
+            ls -la "$AVD"
+          else
+            echo "no saved phone yet - fresh start"
+          fi
+
+      - name: Run phone until shutdown time
         uses: reactivecircus/android-emulator-runner@v2
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           api-level: 34
           arch: x86_64
-          target: google_apis
+          target: google_apis_playstore
           profile: pixel_6
           cores: 4
           ram-size: 4096M
           disk-size: 8G
+          force-avd-creation: false
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           script: bash ./scripts/run.sh
+
+      # ---- save the phone, then start the next run ----
+      - name: Pack phone
+        if: success() && env.BACKUP_KEY != ''
+        run: |
+          AVD="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+          cd "$AVD"
+          tar -S --exclude='*/snapshots' --exclude='*.lock' -c test.avd test.ini \
+            | zstd -T0 -3 \
+            | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_KEY -out /tmp/phone.tar.zst.enc
+          ls -lh /tmp/phone.tar.zst.enc
+
+      - name: Save phone
+        if: success() && env.BACKUP_KEY != ''
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/phone.tar.zst.enc
+          key: phone-state-${{ github.run_id }}
+
+      - name: Start next run
+        if: success()
+        run: gh workflow run emulator.yml -R "$GITHUB_REPOSITORY"
